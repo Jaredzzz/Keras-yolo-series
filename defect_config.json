@@ -1,0 +1,45 @@
+{
+    "model" : {
+        "min_input_size":       416,
+        "max_input_size":       640,
+        "anchors":              [12, 16, 19, 36, 40, 28, 36, 75, 76, 55, 72, 146, 142, 110, 192, 243, 459, 401],
+        "labels":               ["patches","scratches"]
+    },
+
+    "train": {
+        "train_image_folder":   "/home/zjj/Data/rail_defect/VOCdevkit/VOC2019/JPEGImages/",
+        "train_annot_folder":   "/home/zjj/Data/rail_defect/VOCdevkit/VOC2019/Annotations/",
+        "cache_name":           "rail_defect_train.pkl",
+
+        "train_times":          4,
+        "batch_size":           8,
+        "learning_rate":        1e-3,
+        "nb_epochs":            10,
+        "warmup_epochs":        3,
+        "iou_loss_thresh":      0.5,
+        "gpus":                 "0,1",
+
+        "grid_scales":          [1,1,1],
+        "obj_scale":            5,
+        "noobj_scale":          1,
+        "xywh_scale":           1,
+        "class_scale":          5,
+
+        "tensorboard_dir":      "logs",
+        "saved_weights_name":   "rail_defect.h5",
+        "debug":                false
+    },
+
+    "valid": {
+        "valid_image_folder":   "",
+        "valid_annot_folder":   "",
+        "cache_name":           "rail_defect_val.pkl",
+        "valid_times":          1
+    },
+	
+	"predict":{
+		"obj_thresh" : 0.8,
+		"nms_thresh" : 0.5,
+		"time": 1
+	}
+}
