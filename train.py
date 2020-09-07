@@ -13,6 +13,7 @@ from utils.multi_gpu_model import multi_gpu_model
 import tensorflow as tf
 import keras
 from keras.models import load_model
+from utils.draw_loss import LossHistory
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
@@ -97,8 +98,9 @@ def create_callbacks(saved_weights_name, tensorboard_logs, model_to_save):
         log_dir                = tensorboard_logs,
         write_graph            = True,
         write_images           = True,
-    )    
-    return [early_stop, checkpoint, reduce_on_plateau, tensorboard]
+    )
+    logs_loss = LossHistory()
+    return [early_stop, checkpoint, reduce_on_plateau, tensorboard, logs_loss]
 
 
 
@@ -222,7 +224,7 @@ def _main_(args):
     callbacks = create_callbacks(config['train']['saved_weights_name'], config['train']['tensorboard_dir'], infer_model)
     print("[INFO] Training Model...")
     train_model.fit_generator(
-        generator        = train_generator, 
+        generator        = train_generator,
         steps_per_epoch  = len(train_generator) * config['train']['train_times'], 
         epochs           = config['train']['nb_epochs'] + config['train']['warmup_epochs'], 
         verbose          = 2 if config['train']['debug'] else 1,
