@@ -174,6 +174,7 @@ class YoloLayer(Layer):
         """
         Compare each true box to all anchor boxes
         """
+        # 差平方和误差（sum-squared error）
         wh_scale = tf.exp(true_box_wh) * self.anchors / net_factor
         box_loss_scale = tf.expand_dims(2 - wh_scale[..., 0] * wh_scale[..., 1],
                                   axis=4)  # the smaller the box, the bigger the scale
@@ -190,7 +191,7 @@ class YoloLayer(Layer):
                           4) * \
                       self.class_scale
 
-        loss_xy = tf.reduce_sum(tf.square(xy_delta), list(range(1, 5)))    # SSE  和方差
+        loss_xy = tf.reduce_sum(tf.square(xy_delta), list(range(1, 5)))
         loss_wh = tf.reduce_sum(tf.square(wh_delta), list(range(1, 5)))
         loss_conf = tf.reduce_sum(tf.square(conf_delta), list(range(1, 5)))
         loss_class = tf.reduce_sum(class_delta, list(range(1, 5)))

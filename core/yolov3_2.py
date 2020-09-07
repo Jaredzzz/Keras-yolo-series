@@ -1,18 +1,17 @@
-from keras.layers import Dense,Conv2D, Input, BatchNormalization, LeakyReLU, ZeroPadding2D,UpSampling2D
-from keras.layers.merge import add,concatenate
+from keras.layers import Input, UpSampling2D
+from keras.layers.merge import concatenate
 from keras.models import Model
-from keras.initializers import glorot_uniform
 import os
 import tensorflow as tf
 from keras.engine.topology import Layer
 import numpy as np
-from core.backbone import csp_darknet53_model,_darknet_conv_block
+from core.backbone import csp_darknet53_model, _darknet_conv_block
 
 
 class YoloLayer(Layer):
     def __init__(self, anchors, max_grid, batch_size, warmup_batches, ignore_thresh,
-                 grid_scale, obj_scale, noobj_scale, xywh_scale, class_scale,
-                 **kwargs):
+                 grid_scale, obj_scale, noobj_scale, xywh_scale, class_scale, iou_loss,
+                 focal_loss, **kwargs):
         # make the model settings persistent
         self.ignore_thresh = ignore_thresh
         self.warmup_batches = warmup_batches
@@ -22,6 +21,8 @@ class YoloLayer(Layer):
         self.noobj_scale = noobj_scale
         self.xywh_scale = xywh_scale
         self.class_scale = class_scale
+        self.iou_loss = iou_loss
+        self.focal_loss = focal_loss
 
         # make a persistent mesh grid
         max_grid_h, max_grid_w = max_grid
@@ -87,15 +88,16 @@ class YoloLayer(Layer):
         true_xy = true_boxes[..., 0:2] / grid_factor
         true_wh = true_boxes[..., 2:4] / net_factor
 
-
         pred_xy = tf.expand_dims(pred_box_xy / grid_factor, 4)
         pred_wh = tf.expand_dims(tf.exp(pred_box_wh) * self.anchors / net_factor, 4)
 
-        iou = self.bbox_iou(true_xy,true_wh,pred_xy,pred_wh)
+        iou = self.bbox_iou(true_xy, true_wh, pred_xy, pred_wh)
         # 找出与真实框IOU最大的边界框
         best_ious = tf.reduce_max(iou, axis=4)
         # 如果最大的IOU小于阈值, 那么认为不包含目标,则为背景框
-        conf_delta *= tf.expand_dims(tf.to_float(best_ious < self.ignore_thresh), 4)
+        noobj_mask = (1 - object_mask) * tf.expand_dims(tf.to_float(best_ious < self.ignore_thresh), 4)
+        # best_ious < self.ignore_thresh: 1;best_ious > self.ignore_thresh:0
+        # conf_delta *= tf.expand_dims(tf.to_float(best_ious < self.ignore_thresh), 4)
 
         """
         Compute some online statistics
@@ -106,7 +108,22 @@ class YoloLayer(Layer):
         pred_xy = pred_box_xy / grid_factor
         pred_wh = tf.exp(pred_box_wh) * self.anchors / net_factor
 
-        iou = self.bbox_iou(true_xy,true_wh,pred_xy,pred_wh)
+        if self.iou_loss == "giou":
+            print('[INFO] Using giou loss')
+            iou = self.bbox_giou(true_xy, true_wh, pred_xy, pred_wh)
+        elif self.iou_loss == "diou":
+            print('[INFO] Using diou loss')
+            iou = self.bbox_diou(true_xy, true_wh, pred_xy, pred_wh)
+        elif self.iou_loss == "ciou":
+            print('[INFO] Using ciou loss')
+            iou = self.bbox_ciou(true_xy, true_wh, pred_xy, pred_wh)
+        elif self.iou_loss == "mse":
+            print('[INFO] Using mse loss')
+            iou = self.bbox_iou(true_xy, true_wh, pred_xy, pred_wh)
+        else:
+            print('[INFO] Using iou loss')
+            iou = self.bbox_iou(true_xy, true_wh, pred_xy, pred_wh)
+
         iou_scores = object_mask * tf.expand_dims(iou, 4)
 
         count = tf.reduce_sum(object_mask)
@@ -140,32 +157,40 @@ class YoloLayer(Layer):
         Compare each true box to all anchor boxes
         """
         wh_scale = tf.exp(true_box_wh) * self.anchors / net_factor
-        box_loss_scale = tf.expand_dims(2 - wh_scale[..., 0] * wh_scale[..., 1],
-                                  axis=4)  # the smaller the box, the bigger the scale
+        # the smaller the box, the bigger the scale
+        box_loss_scale = tf.expand_dims(2 - wh_scale[..., 0] * wh_scale[..., 1], axis=4)
 
         iou_loss = object_mask * (1.0 - tf.expand_dims(iou, axis=4)) * box_loss_scale * self.xywh_scale
 
-        xy_delta = xywh_mask * (pred_box_xy - true_box_xy) * box_loss_scale * self.xywh_scale
-        wh_delta = xywh_mask * (pred_box_wh - true_box_wh) * box_loss_scale * self.xywh_scale
+        xy_delta = xywh_mask * tf.square(pred_box_xy - true_box_xy) * box_loss_scale * self.xywh_scale
+        wh_delta = xywh_mask * tf.square(pred_box_wh - true_box_wh) * box_loss_scale * self.xywh_scale
         # 计算置信度损失，原理是利用最大iou如果大于阈值才认为目标框含有检测目标
-        conf_delta = object_mask * (pred_box_conf - true_box_conf) * self.obj_scale + (
-                    1 - object_mask) * conf_delta * self.noobj_scale
+        # conf_delta = object_mask * (pred_box_conf - true_box_conf) * self.obj_scale + (
+        #             1 - object_mask) * conf_delta * self.noobj_scale
+        conf_loss = object_mask * self.obj_scale * \
+                    tf.nn.sigmoid_cross_entropy_with_logits(labels=true_box_conf, logits=tf.expand_dims(y_pred[..., 4], 4))+\
+                    noobj_mask * self.noobj_scale * \
+                    tf.nn.sigmoid_cross_entropy_with_logits(labels=true_box_conf, logits=tf.expand_dims(y_pred[..., 4], 4))
+        if self.focal_loss:
+            conf_loss *= self.focal(true_box_conf, pred_box_conf, alpha=0.25, gamma=2)
         # 分类交叉熵损失
-        class_delta = object_mask * \
-                      tf.expand_dims(
-                          tf.nn.sparse_softmax_cross_entropy_with_logits(labels=true_box_class, logits=pred_box_class),
-                          4) * \
-                      self.class_scale
+        class_delta = object_mask * tf.expand_dims(
+            tf.nn.sparse_softmax_cross_entropy_with_logits(labels=true_box_class, logits=pred_box_class),
+            4) * self.class_scale
 
-        loss_xy = tf.reduce_sum(tf.square(xy_delta), list(range(1, 5)))
-        loss_wh = tf.reduce_sum(tf.square(wh_delta), list(range(1, 5)))
-        loss_iou = tf.reduce_sum(iou_loss,list(range(1, 5)))
-        loss_conf = tf.reduce_sum(tf.square(conf_delta), list(range(1, 5)))
+        loss_xy = tf.reduce_sum(xy_delta, list(range(1, 5)))
+        loss_wh = tf.reduce_sum(wh_delta, list(range(1, 5)))
+        loss_iou = tf.reduce_sum(iou_loss, list(range(1, 5)))
+        # loss_conf = tf.reduce_sum(tf.square(conf_delta), list(range(1, 5)))
+        loss_conf = tf.reduce_sum(conf_loss, list(range(1, 5)))
         loss_class = tf.reduce_sum(class_delta, list(range(1, 5)))
 
-        loss = loss_iou + loss_conf + loss_class
+        if self.iou_loss == "mse":
+            loss = loss_xy + loss_wh + loss_conf + loss_class
+        else:
+            loss = loss_iou + loss_conf + loss_class
 
-        loss = tf.Print(loss, [grid_h, avg_obj], message='avg_obj \t\t', summarize=1000)
+        loss = tf.Print(loss, [grid_h, avg_obj], message='\navg_obj \t\t', summarize=1000)
         loss = tf.Print(loss, [grid_h, avg_noobj], message='avg_noobj \t\t', summarize=1000)
         loss = tf.Print(loss, [grid_h, avg_iou], message='avg_iou \t\t', summarize=1000)
         loss = tf.Print(loss, [grid_h, avg_cat], message='avg_cat \t\t', summarize=1000)
@@ -176,34 +201,34 @@ class YoloLayer(Layer):
                                tf.reduce_sum(loss_wh),
                                tf.reduce_sum(loss_iou),
                                tf.reduce_sum(loss_conf),
-                               tf.reduce_sum(loss_class)], message='loss xy, wh, iou, conf, class: \t', summarize=1000)
+                               tf.reduce_sum(loss_class)], message='loss xy, wh, %s, conf, class: \t' % self.iou_loss, summarize=1000)
 
         return loss * self.grid_scale
 
     def compute_output_shape(self, input_shape):
         return [(None, 1)]
 
-    def focal(self, target, actual, alpha=1, gamma=2):
+    def focal(self, target, actual, alpha=0.25, gamma=2):
         # 目标检测中, 通常正样本较少, alpha可以调节正负样本的比例,
         focal_loss = alpha * tf.pow(tf.abs(target - actual), gamma)
         return focal_loss
 
-    def bbox_giou(self, boxes1_xy,boxes1_wh, boxes2_xy,boxes2_wh):
+    def bbox_giou(self, boxes1_xy, boxes1_wh, boxes2_xy, boxes2_wh):
         # boxes:[x,y,w,h]转化为[xmin,ymin,xmax,ymax]
         boxes1_wh_half = boxes1_wh / 2.
         boxes1_mins = boxes1_xy - boxes1_wh_half
         boxes1_maxes = boxes1_xy + boxes1_wh_half
-        boxes1 = tf.concat([boxes1_mins,boxes1_maxes], axis=-1)
+        boxes1 = tf.concat([boxes1_mins, boxes1_maxes], axis=-1)
 
         boxes2_wh_half = boxes2_wh / 2.
         boxes2_mins = boxes2_xy - boxes2_wh_half
         boxes2_maxes = boxes2_xy + boxes2_wh_half
-        boxes2 = tf.concat([boxes2_mins,boxes2_maxes], axis=-1)
-
-        boxes1 = tf.concat([tf.minimum(boxes1[..., :2], boxes1[..., 2:]),
-                            tf.maximum(boxes1[..., :2], boxes1[..., 2:])], axis=-1)
-        boxes2 = tf.concat([tf.minimum(boxes2[..., :2], boxes2[..., 2:]),
-                            tf.maximum(boxes2[..., :2], boxes2[..., 2:])], axis=-1)
+        boxes2 = tf.concat([boxes2_mins, boxes2_maxes], axis=-1)
+        #
+        # boxes1 = tf.concat([tf.minimum(boxes1[..., :2], boxes1[..., 2:]),
+        #                     tf.maximum(boxes1[..., :2], boxes1[..., 2:])], axis=-1)
+        # boxes2 = tf.concat([tf.minimum(boxes2[..., :2], boxes2[..., 2:]),
+        #                     tf.maximum(boxes2[..., :2], boxes2[..., 2:])], axis=-1)
 
         # 计算boxe1和boxes2的面积
         boxes1_area = (boxes1[..., 2] - boxes1[..., 0]) * (boxes1[..., 3] - boxes1[..., 1])
@@ -217,7 +242,7 @@ class YoloLayer(Layer):
         inter_section = tf.maximum(right_down - left_up, 0.0)
         inter_area = inter_section[..., 0] * inter_section[..., 1]
         union_area = boxes1_area + boxes2_area - inter_area
-        iou = tf.truediv(inter_area,union_area)
+        iou = tf.truediv(inter_area, union_area)
 
         # 计算最小外接矩形C的左上角和右下角坐标
         enclose_left_up = tf.minimum(boxes1[..., :2], boxes2[..., :2])
@@ -256,15 +281,107 @@ class YoloLayer(Layer):
         inter_area = inter_section[..., 0] * inter_section[..., 1]
         # 计算并集，并计算IOU
         union_area = boxes1_area + boxes2_area - inter_area
-        iou = tf.truediv(inter_area,union_area)
+        iou = tf.truediv(inter_area, union_area)
 
         return iou
 
+    def bbox_diou(self, boxes1_xy, boxes1_wh, boxes2_xy, boxes2_wh):
+        # boxes:[x,y,w,h]转化为[xmin,ymin,xmax,ymax]
+        boxes1_wh_half = boxes1_wh / 2.
+        boxes1_mins = boxes1_xy - boxes1_wh_half
+        boxes1_maxes = boxes1_xy + boxes1_wh_half
+        boxes1 = tf.concat([boxes1_mins, boxes1_maxes], axis=-1)
+
+        boxes2_wh_half = boxes2_wh / 2.
+        boxes2_mins = boxes2_xy - boxes2_wh_half
+        boxes2_maxes = boxes2_xy + boxes2_wh_half
+        boxes2 = tf.concat([boxes2_mins, boxes2_maxes], axis=-1)
+
+        # 计算boxe1和boxes2的面积
+        boxes1_area = (boxes1[..., 2] - boxes1[..., 0]) * (boxes1[..., 3] - boxes1[..., 1])
+        boxes2_area = (boxes2[..., 2] - boxes2[..., 0]) * (boxes2[..., 3] - boxes2[..., 1])
+
+        # 计算boxe1和boxes2交集的左上角和右下角坐标
+        left_up = tf.maximum(boxes1[..., :2], boxes2[..., :2])
+        right_down = tf.minimum(boxes1[..., 2:], boxes2[..., 2:])
+
+        # 计算交集区域的宽高, 没有交集,宽高为置0
+        inter_section = tf.maximum(right_down - left_up, 0.0)
+        inter_area = inter_section[..., 0] * inter_section[..., 1]
+        union_area = boxes1_area + boxes2_area - inter_area
+        iou = tf.truediv(inter_area, union_area)
+
+        # 计算最小外接矩形C的左上角和右下角坐标
+        enclose_left_up = tf.minimum(boxes1[..., :2], boxes2[..., :2])
+        enclose_right_down = tf.maximum(boxes1[..., 2:], boxes2[..., 2:])
+
+        # 计算最小闭合面C的宽高,与其对角线长的平方
+        enclose = tf.maximum(enclose_right_down - enclose_left_up, 0.0)
+        enclose_diagonal_line = tf.square(enclose[..., 0])+tf.square(enclose[..., 1])
+
+        # 计算两个框中心点的距离平方
+        distance_box_center = tf.square(boxes1_xy[..., 0]-boxes2_xy[..., 0]) + \
+                              tf.square(boxes1_xy[..., 1]-boxes2_xy[..., 1])
+
+        # calculate diou
+        diou = iou - 1.0 * distance_box_center / enclose_diagonal_line
+
+        return diou
+
+    def bbox_ciou(self,boxes1_xy, boxes1_wh, boxes2_xy, boxes2_wh):
+        # boxes:[x,y,w,h]转化为[xmin,ymin,xmax,ymax]
+        boxes1_wh_half = boxes1_wh / 2.
+        boxes1_mins = boxes1_xy - boxes1_wh_half
+        boxes1_maxes = boxes1_xy + boxes1_wh_half
+        boxes1 = tf.concat([boxes1_mins, boxes1_maxes], axis=-1)
+
+        boxes2_wh_half = boxes2_wh / 2.
+        boxes2_mins = boxes2_xy - boxes2_wh_half
+        boxes2_maxes = boxes2_xy + boxes2_wh_half
+        boxes2 = tf.concat([boxes2_mins, boxes2_maxes], axis=-1)
+
+        # 计算boxe1和boxes2的面积
+        boxes1_area = (boxes1[..., 2] - boxes1[..., 0]) * (boxes1[..., 3] - boxes1[..., 1])
+        boxes2_area = (boxes2[..., 2] - boxes2[..., 0]) * (boxes2[..., 3] - boxes2[..., 1])
+
+        # 计算boxe1和boxes2交集的左上角和右下角坐标
+        left_up = tf.maximum(boxes1[..., :2], boxes2[..., :2])
+        right_down = tf.minimum(boxes1[..., 2:], boxes2[..., 2:])
+
+        # 计算交集区域的宽高, 没有交集,宽高为置0
+        inter_section = tf.maximum(right_down - left_up, 0.0)
+        inter_area = inter_section[..., 0] * inter_section[..., 1]
+        union_area = boxes1_area + boxes2_area - inter_area
+        iou = tf.truediv(inter_area, union_area)
+
+        # 计算最小外接矩形C的左上角和右下角坐标
+        enclose_left_up = tf.minimum(boxes1[..., :2], boxes2[..., :2])
+        enclose_right_down = tf.maximum(boxes1[..., 2:], boxes2[..., 2:])
+
+        # 计算最小闭合面C的宽高,与其对角线长的平方
+        enclose = tf.maximum(enclose_right_down - enclose_left_up, 0.0)
+        enclose_diagonal_line = tf.square(enclose[..., 0]) + tf.square(enclose[..., 1])
+
+        # 计算两个框中心点的距离平方
+        distance_box_center = tf.square(boxes1_xy[..., 0] - boxes2_xy[..., 0]) + \
+                              tf.square(boxes1_xy[..., 1] - boxes2_xy[..., 1])
+
+        # calculate diou
+        diou = iou - 1.0 * distance_box_center / enclose_diagonal_line
+
+        # calculate 惩罚因子（penalty term）:v alpha
+        v = (4.0/tf.square(np.pi)) * tf.square((tf.atan((boxes1_wh[...,0]/boxes1_wh[...,1])) -
+            tf.atan((boxes2_wh[..., 0] / boxes2_wh[..., 1]))))
+
+        alpha = 1.0 * v / ((1.0 - iou) + v)
+
+        ciou = diou - 1.0 * alpha * v
+        return ciou
 
 class YOLOV3(object):
     """Implement keras yolov3 here"""
 
-    def __init__(self, config,max_box_per_image,batch_size,warmup_batches):
+    def __init__(self, config, max_box_per_image, batch_size, warmup_batches):
 
         self.classes = config["model"]["labels"]
         self.num_class = len(self.classes)
@@ -275,14 +392,15 @@ class YOLOV3(object):
         self.xywh_scale = config["train"]["xywh_scale"]
         self.class_scale = config["train"]["class_scale"]
         self.iou_loss_thresh = config["train"]["iou_loss_thresh"]
+        self.iou_loss = config["train"]["iou_loss"]
         self.max_grid = [config['model']['max_input_size'], config['model']['max_input_size']]
         self.batch_size = batch_size
         self.warmup_batches = warmup_batches
         self.max_box_per_image = max_box_per_image
-
+        self.focal_loss = config["train"]["focal_loss"]
 
     def model(self):
-        input_image = Input(shape=(None, None, 3))  # net_h, net_w, 3
+        input_image = Input(shape=(None, None, 3))   # net_h, net_w, 3
         true_boxes = Input(shape=(1, 1, 1, self.max_box_per_image, 4))
         true_yolo_1 = Input(
             shape=(None, None, len(self.anchors) // 6, 4 + 1 + self.num_class))  # grid_h, grid_w, nb_anchor, 5+nb_class
@@ -292,13 +410,13 @@ class YOLOV3(object):
             shape=(None, None, len(self.anchors) // 6, 4 + 1 + self.num_class))  # grid_h, grid_w, nb_anchor, 5+nb_class
         route_1, route_2, input_data = csp_darknet53_model(input_image)
 
-        x = _darknet_conv_block(input_data,convs=[
+        x = _darknet_conv_block(input_data, convs=[
             {'filter': 512, 'kernel': 1, 'stride': 1, 'bnorm': True, 'leaky': True, 'layer_idx': "yolo_1"},
             {'filter': 1024, 'kernel': 3, 'stride': 1, 'bnorm': True, 'leaky': True, 'layer_idx': "yolo_2"},
             {'filter': 512, 'kernel': 1, 'stride': 1, 'bnorm': True, 'leaky': True, 'layer_idx': "yolo_3"},
             {'filter': 1024, 'kernel': 3, 'stride': 1, 'bnorm': True, 'leaky': True, 'layer_idx': "yolo_4"},
             {'filter': 512, 'kernel': 1, 'stride': 1, 'bnorm': True, 'leaky': True, 'layer_idx': "yolo_5"}])
-        pred_conv_lbbox = _darknet_conv_block(x,convs=[
+        pred_conv_lbbox = _darknet_conv_block(x, convs=[
             {'filter': 1024, 'kernel': 3, 'stride': 1, 'bnorm': True, 'leaky': True, 'layer_idx': "yolo_6"},
             {'filter': (3 * (5 + self.num_class)), 'kernel': 1, 'stride': 1, 'bnorm': False, 'leaky': False, 'layer_idx': "yolo_7"}])
 
@@ -311,19 +429,21 @@ class YOLOV3(object):
                                 self.obj_scale,
                                 self.noobj_scale,
                                 self.xywh_scale,
-                                self.class_scale)([input_image, pred_conv_lbbox, true_yolo_1, true_boxes])
+                                self.class_scale,
+                                self.iou_loss,
+                                self.focal_loss)([input_image, pred_conv_lbbox, true_yolo_1, true_boxes])
         x = _darknet_conv_block(x, convs=[
             {'filter': 256, 'kernel': 1, 'stride': 1, 'bnorm': True, 'leaky': True, 'layer_idx': "yolo_8"}])
         x = UpSampling2D(2)(x)
         x = concatenate([x, route_2])
 
-        x = _darknet_conv_block(x,convs=[
+        x = _darknet_conv_block(x, convs=[
             {'filter': 256, 'kernel': 1, 'stride': 1, 'bnorm': True, 'leaky': True, 'layer_idx': "yolo_11"},
             {'filter': 512, 'kernel': 3, 'stride': 1, 'bnorm': True, 'leaky': True, 'layer_idx': "yolo_12"},
             {'filter': 256, 'kernel': 1, 'stride': 1, 'bnorm': True, 'leaky': True, 'layer_idx': "yolo_13"},
             {'filter': 512, 'kernel': 3, 'stride': 1, 'bnorm': True, 'leaky': True, 'layer_idx': "yolo_14"},
             {'filter': 256, 'kernel': 1, 'stride': 1, 'bnorm': True, 'leaky': True,   'layer_idx': "yolo_15"}])
-        pred_conv_mbbox = _darknet_conv_block(x,convs=[
+        pred_conv_mbbox = _darknet_conv_block(x, convs=[
             {'filter': 512, 'kernel': 3, 'stride': 1, 'bnorm': True, 'leaky': True, 'layer_idx': "yolo_16"},
             {'filter': (3 * (5 + self.num_class)), 'kernel': 1, 'stride': 1, 'bnorm': False, 'leaky': False, 'layer_idx': "yolo_17"}])
         loss_yolo_2 = YoloLayer(self.anchors[6:12],
@@ -335,7 +455,9 @@ class YOLOV3(object):
                                 self.obj_scale,
                                 self.noobj_scale,
                                 self.xywh_scale,
-                                self.class_scale)([input_image, pred_conv_mbbox, true_yolo_2, true_boxes])
+                                self.class_scale,
+                                self.iou_loss,
+                                self.focal_loss)([input_image, pred_conv_mbbox, true_yolo_2, true_boxes])
         x = _darknet_conv_block(x, convs=[
             {'filter': 128, 'kernel': 1, 'stride': 1, 'bnorm': True, 'leaky': True, 'layer_idx': "yolo_18"}])
         x = UpSampling2D(2)(x)
@@ -347,7 +469,7 @@ class YOLOV3(object):
             {'filter': 128, 'kernel': 1, 'stride': 1, 'bnorm': True, 'leaky': True, 'layer_idx': "yolo_23"},
             {'filter': 256, 'kernel': 3, 'stride': 1, 'bnorm': True, 'leaky': True, 'layer_idx': "yolo_24"},
             {'filter': 128, 'kernel': 1, 'stride': 1, 'bnorm': True, 'leaky': True, 'layer_idx': "yolo_25"}])
-        pred_conv_sbbox = _darknet_conv_block(x,convs=[
+        pred_conv_sbbox = _darknet_conv_block(x, convs=[
             {'filter': 256, 'kernel': 3, 'stride': 1, 'bnorm': True, 'leaky': True, 'layer_idx': "yolo_26"},
             {'filter': (3 * (5 + self.num_class)), 'kernel': 1, 'stride': 1, 'bnorm': False, 'leaky': False, 'layer_idx': "yolo_27"}])
 
@@ -360,14 +482,15 @@ class YOLOV3(object):
                                 self.obj_scale,
                                 self.noobj_scale,
                                 self.xywh_scale,
-                                self.class_scale)([input_image, pred_conv_sbbox, true_yolo_3, true_boxes])
+                                self.class_scale,
+                                self.iou_loss,
+                                self.focal_loss)([input_image, pred_conv_sbbox, true_yolo_3, true_boxes])
 
         train_model = Model([input_image, true_boxes, true_yolo_1, true_yolo_2, true_yolo_3],
                             [loss_yolo_1, loss_yolo_2, loss_yolo_3])
         infer_model = Model(input_image, [pred_conv_lbbox, pred_conv_mbbox, pred_conv_sbbox])
 
         return [train_model, infer_model]
-
 
 
 def dummy_loss(y_true, y_pred):
