@@ -2,6 +2,7 @@
     "model" : {
         "min_input_size":       416,
         "max_input_size":       640,
+        "backbone_model":       "cspdarknet53",
         "anchors":              [12, 16, 19, 36, 40, 28, 36, 75, 76, 55, 72, 146, 142, 110, 192, 243, 459, 401],
         "labels":               ["patches","scratches"]
     },
@@ -14,9 +15,9 @@
         "train_times":          2,
         "batch_size":           8,
         "learning_rate":        1e-3,
-        "nb_epochs":            10,
+        "nb_epochs":            5,
         "warmup_epochs":        3,
-        "iou_loss":             "ciou",
+        "iou_loss":             "diou",
         "focal_loss":           true,
         "iou_loss_thresh":      0.5,
         "gpus":                 "0,1",
