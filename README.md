@@ -4,5 +4,5 @@
 python train.py -c detect_config.json
 
 # test your model for dataset:
-python evaluate.py -c defect_config.json 
+python evaluate.py -c detect_config.json 
 
