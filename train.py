@@ -3,7 +3,7 @@ import os
 import numpy as np
 import json
 from voc import parse_voc_annotation
-from core.yolov3_2 import YOLOV3,dummy_loss
+from core.yolov3 import YOLOV3,dummy_loss
 from generator import BatchGenerator
 from utils.utils import normalize, evaluate, makedirs
 from keras.callbacks import EarlyStopping, ReduceLROnPlateau
@@ -226,7 +226,9 @@ def _main_(args):
     train_model.fit_generator(
         generator        = train_generator,
         steps_per_epoch  = len(train_generator) * config['train']['train_times'], 
-        epochs           = config['train']['nb_epochs'] + config['train']['warmup_epochs'], 
+        epochs           = config['train']['nb_epochs'] + config['train']['warmup_epochs'],
+        # validation_data  = valid_generator,
+        # validation_steps = len(train_generator) / config['train']['batch_size'],
         verbose          = 2 if config['train']['debug'] else 1,
         callbacks        = callbacks, 
         workers          = 4,
