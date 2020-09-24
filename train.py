@@ -4,6 +4,7 @@ import numpy as np
 import json
 from voc import parse_voc_annotation
 from core.yolov3 import YOLOV3,dummy_loss
+from core.yolov4 import YOLOV4
 from generator import BatchGenerator
 from utils.utils import normalize, evaluate, makedirs
 from keras.callbacks import EarlyStopping, ReduceLROnPlateau
@@ -103,7 +104,6 @@ def create_callbacks(saved_weights_name, tensorboard_logs, model_to_save):
     return [early_stop, checkpoint, reduce_on_plateau, tensorboard, logs_loss]
 
 
-
 def create_model(
     config,
     max_box_per_image,
@@ -112,30 +112,51 @@ def create_model(
     saved_weights_name,
     lr
 ):
-    if multi_gpu > 1:
-        with tf.device('/cpu:0'):
+    if config["model"]["model_name"] == "yolov3":
+        print('[INFO] YOLOV3 Model Creating...')
+        if multi_gpu > 1:
+            with tf.device('/cpu:0'):
+                yolo_model = YOLOV3(
+                    config=config,
+                    max_box_per_image=max_box_per_image,
+                    batch_size=config["train"]["batch_size"] // multi_gpu,
+                    warmup_batches=warmup_batches)
+                template_model, infer_model = yolo_model.model()
+        else:
             yolo_model = YOLOV3(
                 config=config,
                 max_box_per_image=max_box_per_image,
-                batch_size=config["train"]["batch_size"] // multi_gpu,
+                batch_size=config["train"]["batch_size"],
                 warmup_batches=warmup_batches)
             template_model, infer_model = yolo_model.model()
 
+    elif config["model"]["model_name"] == "yolov4":
+        print('[INFO] YOLOV4 Model Creating...')
+        if multi_gpu > 1:
+            with tf.device('/cpu:0'):
+                yolo_model = YOLOV4(
+                    config=config,
+                    max_box_per_image=max_box_per_image,
+                    batch_size=config["train"]["batch_size"] // multi_gpu,
+                    warmup_batches=warmup_batches)
+                template_model, infer_model = yolo_model.model()
+        else:
+            yolo_model = YOLOV4(
+                config=config,
+                max_box_per_image=max_box_per_image,
+                batch_size=config["train"]["batch_size"],
+                warmup_batches=warmup_batches)
+            template_model, infer_model = yolo_model.model()
     else:
-        yolo_model =YOLOV3(
-            config=config,
-            max_box_per_image=max_box_per_image,
-            batch_size=config["train"]["batch_size"],
-            warmup_batches=warmup_batches)
-        template_model, infer_model = yolo_model.model()
+        pass
 
     # load the pretrained weight if exists, otherwise load the backend weight only
     if os.path.exists(saved_weights_name):
         print("[INFO] Find pretrained weights...")
         print("\n[INFO] Loading pretrained weights...\n")
         template_model.load_weights(saved_weights_name)
-    #else:
-        #template_model.load_weights("backend.h5", by_name=True)
+    # else:
+        # template_model.load_weights("backend.h5", by_name=True)
 
     if multi_gpu > 1:
         train_model = multi_gpu_model(template_model, gpus=multi_gpu)
