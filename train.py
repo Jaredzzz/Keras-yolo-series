@@ -242,7 +242,12 @@ def _main_(args):
     ###############################
     #   Kick off the training
     ###############################
-    callbacks = create_callbacks(config['train']['saved_weights_name'], config['train']['tensorboard_dir'], infer_model)
+    callbacks = create_callbacks(config['train']['saved_weights_name'],
+                                 config['train']['tensorboard_dir'],
+                                 infer_model,
+                                 valid_generator,
+                                 labels,
+                                 config_path.split('_')[0])
     print("[INFO] Training Model...")
     train_model.fit_generator(
         generator        = train_generator,
@@ -266,12 +271,16 @@ def _main_(args):
     #   Run the evaluation
     ###############################   
     # compute mAP for all the classes
-    average_precisions = evaluate(infer_model, valid_generator)
+   average_precisions = evaluate(infer_model, valid_generator)
+    ap = []
 
-    # print the score
+    # print the mAP score
     for label, average_precision in average_precisions.items():
-        print(labels[label] + ': {:.4f}'.format(average_precision))
-    print('mAP: {:.4f}'.format(sum(average_precisions.values()) / len(average_precisions)))
+        print(labels[label] + ' average precision(AP): {:.6f}'.format(average_precision['ap']))
+        ap.append(average_precision['ap'])
+        print(labels[label] + ' recall: {:.6f}'.format(average_precision['recall']))
+        print(labels[label] + ' precision: {:.6f}'.format(average_precision['precision']))
+    print('[INFO] mAP: {:.6f}'.format(sum(ap) / len(ap)))
     print("[INFO] Completed...")
 
 if __name__ == '__main__':
