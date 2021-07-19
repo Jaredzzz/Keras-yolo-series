@@ -58,9 +58,16 @@ def _main_(args):
                                   obj_thresh=config['test']['obj_thresh'])
 
     # print the score
+    average_precisions = evaluate(infer_model, valid_generator)
+    ap = []
+
+    # print the mAP score
     for label, average_precision in average_precisions.items():
-        print(labels[label] + ': {:.4f}'.format(average_precision))
-    print('mAP: {:.4f}'.format(sum(average_precisions.values()) / len(average_precisions)))           
+        print(labels[label] + ' average precision(AP): {:.6f}'.format(average_precision['ap']))
+        ap.append(average_precision['ap'])
+        print(labels[label] + ' recall: {:.6f}'.format(average_precision['recall']))
+        print(labels[label] + ' precision: {:.6f}'.format(average_precision['precision']))
+    print('[INFO] mAP: {:.6f}'.format(sum(ap) / len(ap)))        
 
 if __name__ == '__main__':
     argparser = argparse.ArgumentParser(description='Evaluate YOLO_v3 model on any dataset')
