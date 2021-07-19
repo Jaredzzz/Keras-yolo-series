@@ -1,8 +1,10 @@
 import cv2
 import numpy as np
 import os
-from .bbox import BoundBox, bbox_iou
+from .bbox import BoundBox, bbox_iou, bbox_diounms
 from scipy.special import expit
+import time
+
 
 def _sigmoid(x):
     return expit(x)
@@ -20,13 +22,16 @@ def makedirs(path):
         if not os.path.isdir(path):
             raise
 
+
 def evaluate(model, 
              generator, 
              iou_threshold=0.5,
              obj_thresh=0.5,
              nms_thresh=0.45,
-             net_h=416,
-             net_w=416,
+             net_h=512,
+             net_w=512,
+             nms_kind="greedynms",
+             beta=0.6,
              save_path=None):
     """ Evaluate a given dataset using a given model.
     code originally from https://github.com/fizyr/keras-retinanet
@@ -51,13 +56,14 @@ def evaluate(model,
         raw_image = [generator.load_image(i)]
 
         # make the boxes and the labels
-        pred_boxes = get_yolo_boxes(model, raw_image, net_h, net_w, generator.get_anchors(), obj_thresh, nms_thresh)[0]
-
+        pred_batch_boxes, _ = get_yolo_boxes(model, raw_image, net_h, net_w, generator.get_anchors(), obj_thresh,
+                                             nms_thresh, nms_kind, beta)
+        pred_boxes = pred_batch_boxes[0]
         score = np.array([box.get_score() for box in pred_boxes])
         pred_labels = np.array([box.label for box in pred_boxes])        
         
         if len(pred_boxes) > 0:
-            pred_boxes = np.array([[box.xmin, box.ymin, box.xmax, box.ymax, box.get_score()] for box in pred_boxes]) 
+            pred_boxes = np.array([[box.xmin, box.ymin, box.xmax, box.ymax, box.get_score()] for box in pred_boxes])
         else:
             pred_boxes = np.array([[]])  
         
@@ -68,18 +74,19 @@ def evaluate(model,
         
         # copy detections to all_detections
         for label in range(generator.num_classes()):
+            # print(pred_boxes)
             all_detections[i][label] = pred_boxes[pred_labels == label, :]
 
         annotations = generator.load_annotation(i)
-        
+        # print(annotations)
         # copy detections to all_annotations
         for label in range(generator.num_classes()):
             all_annotations[i][label] = annotations[annotations[:, 4] == label, :4].copy()
-
-    # compute mAP by comparing all detections and all annotations
+    # compute mAP by comparing all detections and all annotations and severity precision
     average_precisions = {}
     
     for label in range(generator.num_classes()):
+        result = {}
         false_positives = np.zeros((0,))
         true_positives  = np.zeros((0,))
         scores          = np.zeros((0,))
@@ -99,7 +106,7 @@ def evaluate(model,
                     true_positives  = np.append(true_positives, 0)
                     continue
 
-                overlaps            = compute_overlap(np.expand_dims(d, axis=0), annotations)
+                overlaps            = compute_overlap(np.expand_dims(d, axis=0), annotations[..., :4])
                 assigned_annotation = np.argmax(overlaps, axis=1)
                 max_overlap         = overlaps[0, assigned_annotation]
 
@@ -107,16 +114,20 @@ def evaluate(model,
                     false_positives = np.append(false_positives, 0)
                     true_positives  = np.append(true_positives, 1)
                     detected_annotations.append(assigned_annotation)
+
                 else:
                     false_positives = np.append(false_positives, 1)
                     true_positives  = np.append(true_positives, 0)
 
-        # no annotations -> AP for this class is 0 (is this correct?)
-        if num_annotations == 0:
-            average_precisions[label] = 0
+        # no annotations -> AP for this class is 0 (is this correct?) and severity precision is 0
+        if num_annotations == 0 or len(true_positives) == 0:
+            result['ap'] = 0
+            result['recall'] = 0
+            result['precision'] = 0
+            average_precisions[label] = result
             continue
 
-        # sort by score
+        # sort by score 按降序排列
         indices         = np.argsort(-scores)
         false_positives = false_positives[indices]
         true_positives  = true_positives[indices]
@@ -129,11 +140,14 @@ def evaluate(model,
         recall    = true_positives / num_annotations
         precision = true_positives / np.maximum(true_positives + false_positives, np.finfo(np.float64).eps)
 
-        # compute average precision
-        average_precision  = compute_ap(recall, precision)  
-        average_precisions[label] = average_precision
+        average_precision = compute_ap(recall, precision)
+        result['ap'] = average_precision
+        result['recall'] = recall[-1]
+        result['precision'] = precision[-1]
+        average_precisions[label] = result
 
-    return average_precisions    
+    return average_precisions
+
 
 def correct_yolo_boxes(boxes, image_h, image_w, net_h, net_w):
     if (float(net_w)/image_w) < (float(net_h)/image_h):
@@ -151,8 +165,9 @@ def correct_yolo_boxes(boxes, image_h, image_w, net_h, net_w):
         boxes[i].xmax = int((boxes[i].xmax - x_offset) / x_scale * image_w)
         boxes[i].ymin = int((boxes[i].ymin - y_offset) / y_scale * image_h)
         boxes[i].ymax = int((boxes[i].ymax - y_offset) / y_scale * image_h)
-        
-def do_nms(boxes, nms_thresh):
+
+
+def do_nms(boxes, nms_thresh, nms_kind, beta):
     if len(boxes) > 0:
         nb_class = len(boxes[0].classes)
     else:
@@ -169,8 +184,13 @@ def do_nms(boxes, nms_thresh):
             for j in range(i+1, len(sorted_indices)):
                 index_j = sorted_indices[j]
 
-                if bbox_iou(boxes[index_i], boxes[index_j]) >= nms_thresh:
+                if bbox_iou(boxes[index_i], boxes[index_j]) >= nms_thresh and nms_kind == "greedynms":
                     boxes[index_j].classes[c] = 0
+                elif bbox_diounms(boxes[index_i], boxes[index_j], beta) >= nms_thresh and nms_kind == "diounms":
+                    boxes[index_j].classes[c] = 0
+                else:
+                    pass
+
 
 def decode_netout(netout, anchors, obj_thresh, net_h, net_w):
     grid_h, grid_w = netout.shape[:2]
@@ -193,24 +213,26 @@ def decode_netout(netout, anchors, obj_thresh, net_h, net_w):
             # 4th element is objectness score
             objectness = netout[row, col, b, 4]
             
-            if(objectness <= obj_thresh): continue
+            if (objectness <= obj_thresh):
+                continue
             
             # first 4 elements are x, y, w, and h
-            x, y, w, h = netout[row,col,b,:4]
+            x, y, w, h = netout[row, col, b, :4]
 
-            x = (col + x) / grid_w # center position, unit: image width
-            y = (row + y) / grid_h # center position, unit: image height
-            w = anchors[2 * b + 0] * np.exp(w) / net_w # unit: image width
-            h = anchors[2 * b + 1] * np.exp(h) / net_h # unit: image height  
-            
+            x = (col + x) / grid_w  # center position, unit: image width
+            y = (row + y) / grid_h  # center position, unit: image height
+            w = anchors[2 * b + 0] * np.exp(w) / net_w  # unit: image width
+            h = anchors[2 * b + 1] * np.exp(h) / net_h  # unit: image height
+
             # last elements are class probabilities
-            classes = netout[row,col,b,5:]
+            classes = netout[row, col, b, 5:]
             
             box = BoundBox(x-w/2, y-h/2, x+w/2, y+h/2, objectness, classes)
 
             boxes.append(box)
 
     return boxes
+
 
 def preprocess_input(image, net_h, net_w):
     new_h, new_w, _ = image.shape
@@ -224,7 +246,7 @@ def preprocess_input(image, net_h, net_w):
         new_h = net_h
 
     # resize the image to the new size
-    resized = cv2.resize(image[:,:,::-1]/255., (new_w, new_h))
+    resized = cv2.resize(image[:, :, ::-1]/255., (new_w, new_h))
 
     # embed the image into the standard letter box
     new_image = np.ones((net_h, net_w, 3)) * 0.5
@@ -233,10 +255,12 @@ def preprocess_input(image, net_h, net_w):
 
     return new_image
 
+
 def normalize(image):
     return image/255.
-       
-def get_yolo_boxes(model, images, net_h, net_w, anchors, obj_thresh, nms_thresh):
+
+
+def get_yolo_boxes(model, images, net_h, net_w, anchors, obj_thresh, nms_thresh, nms_kind, beta):
     image_h, image_w, _ = images[0].shape
     nb_images           = len(images)
     batch_input         = np.zeros((nb_images, net_h, net_w, 3))
@@ -246,27 +270,31 @@ def get_yolo_boxes(model, images, net_h, net_w, anchors, obj_thresh, nms_thresh)
         batch_input[i] = preprocess_input(images[i], net_h, net_w)        
 
     # run the prediction
+    start_time = time.time()
     batch_output = model.predict_on_batch(batch_input)
+    end_time = time.time()
+    total_time = end_time - start_time
     batch_boxes  = [None]*nb_images
 
     for i in range(nb_images):
-        yolos = [batch_output[0][i], batch_output[1][i], batch_output[2][i]]
+        yolos = [batch_output[0][i], batch_output[1][i]]
         boxes = []
 
         # decode the output of the network
         for j in range(len(yolos)):
-            yolo_anchors = anchors[(2-j)*6:(3-j)*6] # config['model']['anchors']
+            yolo_anchors = anchors[(1-j)*6:(2-j)*6]  # config['model']['anchors']
             boxes += decode_netout(yolos[j], yolo_anchors, obj_thresh, net_h, net_w)
 
         # correct the sizes of the bounding boxes
         correct_yolo_boxes(boxes, image_h, image_w, net_h, net_w)
 
         # suppress non-maximal boxes
-        do_nms(boxes, nms_thresh)        
+        do_nms(boxes, nms_thresh, nms_kind, beta)
            
         batch_boxes[i] = boxes
 
-    return batch_boxes        
+    return batch_boxes, total_time
+
 
 def compute_overlap(a, b):
     """
@@ -294,7 +322,8 @@ def compute_overlap(a, b):
     intersection = iw * ih
 
     return intersection / ua  
-    
+
+
 def compute_ap(recall, precision):
     """ Compute the average precision, given the recall and precision curves.
     Code originally from https://github.com/rbgirshick/py-faster-rcnn.
@@ -315,15 +344,15 @@ def compute_ap(recall, precision):
         mpre[i - 1] = np.maximum(mpre[i - 1], mpre[i])
 
     # to calculate area under PR curve, look for points
-    # where X axis (recall) changes value
+    # where X axis (recall) changes value 返回索引
     i = np.where(mrec[1:] != mrec[:-1])[0]
 
     # and sum (\Delta recall) * prec
     ap = np.sum((mrec[i + 1] - mrec[i]) * mpre[i + 1])
-    return ap     
+    return ap
+
 
 def _softmax(x, axis=-1):
     x = x - np.amax(x, axis, keepdims=True)
     e_x = np.exp(x)
-    
     return e_x / e_x.sum(axis, keepdims=True)

@@ -1,7 +1,8 @@
 import numpy as np
 import os
 import cv2
-from .colors import get_color
+from utils.colors import get_color
+
 
 class BoundBox:
     def __init__(self, xmin, ymin, xmax, ymax, c = None, classes = None):
@@ -26,7 +27,8 @@ class BoundBox:
         if self.score == -1:
             self.score = self.classes[self.get_label()]
             
-        return self.score      
+        return self.score
+
 
 def _interval_overlap(interval_a, interval_b):
     x1, x2 = interval_a
@@ -36,12 +38,13 @@ def _interval_overlap(interval_a, interval_b):
         if x4 < x1:
             return 0
         else:
-            return min(x2,x4) - x1
+            return min(x2, x4) - x1
     else:
         if x2 < x3:
              return 0
         else:
-            return min(x2,x4) - x3    
+            return min(x2, x4) - x3
+
 
 def bbox_iou(box1, box2):
     intersect_w = _interval_overlap([box1.xmin, box1.xmax], [box2.xmin, box2.xmax])
@@ -56,9 +59,46 @@ def bbox_iou(box1, box2):
     
     return float(intersect) / union
 
+
+def bbox_diounms(box1, box2, beta):
+    intersect_w = _interval_overlap([box1.xmin, box1.xmax], [box2.xmin, box2.xmax])
+    intersect_h = _interval_overlap([box1.ymin, box1.ymax], [box2.ymin, box2.ymax])
+
+    intersect = intersect_w * intersect_h
+
+    w1, h1 = box1.xmax - box1.xmin, box1.ymax - box1.ymin
+    w2, h2 = box2.xmax - box2.xmin, box2.ymax - box2.ymin
+
+    union = w1 * h1 + w2 * h2 - intersect
+
+    iou = float(intersect / union)
+
+    # 计算最小外接矩形C的左上角和右下角坐标
+    enclose_left_up = min(box1.xmin, box2.xmin), min(box1.ymin, box2.ymin)
+    enclose_right_down = max(box1.xmax, box2.xmax), max(box1.ymax, box2.ymax)
+
+    # 计算最小闭合面C的宽高,与其对角线长的平方
+    enclose = max(enclose_right_down[0] - enclose_left_up[0], 0.0), max(enclose_right_down[1] - enclose_left_up[1], 0.0)
+    enclose_diagonal_line = pow(enclose[0], 2) + pow(enclose[1], 2)
+
+    if enclose_diagonal_line == 0:
+        return iou
+
+    box1_xy = (box1.xmax + box1.xmin)/2, (box1.ymax + box1.ymin)/2
+    box2_xy = (box2.xmax + box2.xmin) / 2, (box2.ymax + box2.ymin) / 2
+    # 计算两个框中心点的距离平方
+    distance_box_center = pow((box1_xy[0] - box2_xy[0]), 2) + pow((box1_xy[1] - box2_xy[1]), 2)
+
+    # calculate diou
+    diou_term = pow(distance_box_center / enclose_diagonal_line, beta)
+
+    diou = iou - 1.0 * diou_term
+
+    return diou
+
 def draw_boxes(image, boxes, labels, obj_thresh, quiet=True):
-    obj=[]
-    allobj=[]
+    obj = []
+    allobj = []
     for box in boxes:
         label_str = ''
         label = -1
@@ -66,33 +106,33 @@ def draw_boxes(image, boxes, labels, obj_thresh, quiet=True):
         for i in range(len(labels)):
             if box.classes[i] > obj_thresh:
                 if label_str != '': label_str += ', '
-                label_str += (labels[i] + ' ' + str(round(box.get_score()*100, 2)) + '%')
+                label_str += (labels[i] + " " + str(round(box.get_score(), 3)))
                 label = i
             if not quiet: print(label_str)
                 
         if label >= 0:
-            text_size = cv2.getTextSize(label_str, cv2.FONT_HERSHEY_SIMPLEX, 1.1e-3 * image.shape[0], 5)
+            text_size = cv2.getTextSize(label_str, cv2.FONT_HERSHEY_SIMPLEX, 1.1e-3 * image.shape[0], 3)
             width, height = text_size[0][0], text_size[0][1]
-            region = np.array([[box.xmin-3,        box.ymin], 
-                               [box.xmin-3,        box.ymin-height-26], 
-                               [box.xmin+width+13, box.ymin-height-26], 
-                               [box.xmin+width+13, box.ymin]], dtype='int32')  
+            region = np.array([[box.xmin-3,        box.ymin+5],
+                               [box.xmin-3,        box.ymin-height-26],
+                               [box.xmin+width+13, box.ymin-height-26],
+                               [box.xmin+width+13, box.ymin+5]], dtype='int32')
 
-            cv2.rectangle(img=image, pt1=(box.xmin,box.ymin), pt2=(box.xmax,box.ymax), color=get_color(label), thickness=5)
+            cv2.rectangle(img=image, pt1=(box.xmin, box.ymin), pt2=(box.xmax, box.ymax), color=get_color(label), thickness=2)
             cv2.fillPoly(img=image, pts=[region], color=get_color(label))
             cv2.putText(img=image, 
-                        text=label_str, 
+                        text=label_str,
                         org=(box.xmin+13, box.ymin - 13), 
-                        fontFace=cv2.FONT_HERSHEY_SIMPLEX, 
-                        fontScale=1e-3 * image.shape[0], 
-                        color=(0,0,0), 
+                        fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                        fontScale=1e-3 * image.shape[0],
+                        color=(0, 0, 0),
                         thickness=1)
-        
+
             obj.append(box.xmin)
             obj.append(box.ymin)
             obj.append(box.xmax)
             obj.append(box.ymax)
             obj.append(label_str)
             allobj.append(obj)
-        obj=[]
-    return image,allobj          
+        obj = []
+    return image, allobj
