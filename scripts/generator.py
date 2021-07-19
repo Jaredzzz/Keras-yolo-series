@@ -17,7 +17,8 @@ class BatchGenerator(Sequence):
         max_net_size=608,    
         shuffle=True, 
         jitter=True, 
-        norm=None
+        norm=None,
+        tiny=False
     ):
         self.instances          = instances
         self.batch_size         = batch_size
@@ -33,6 +34,7 @@ class BatchGenerator(Sequence):
         self.anchors            = [BoundBox(0, 0, anchors[2*i], anchors[2*i+1], 0) for i in range(len(anchors)//2)] # type
         self.net_h              = 512
         self.net_w              = 512
+        self.tiny               = tiny
 
         if shuffle: np.random.shuffle(self.instances)
             
@@ -56,13 +58,24 @@ class BatchGenerator(Sequence):
         t_batch = np.zeros((r_bound - l_bound, 1, 1, 1,  self.max_box_per_image, 4))   # list of ground truth boxes
 
         # initialize the inputs and the outputs
-        yolo_1 = np.zeros((r_bound - l_bound, 1*base_grid_h,  1*base_grid_w, len(self.anchors)//2, 4+1+len(self.labels))) # desired network output 1
-        yolo_2 = np.zeros((r_bound - l_bound, 2*base_grid_h,  2*base_grid_w, len(self.anchors)//2, 4+1+len(self.labels))) # desired network output 2
-        yolos = [yolo_2, yolo_1]
+        if self.tiny:
+            yolo_1 = np.zeros((r_bound - l_bound, 1*base_grid_h,  1*base_grid_w, len(self.anchors)//2, 4+1+len(self.labels))) # desired network output 1
+            yolo_2 = np.zeros((r_bound - l_bound, 2*base_grid_h,  2*base_grid_w, len(self.anchors)//2, 4+1+len(self.labels))) # desired network output 2
+            yolos = [yolo_2, yolo_1]
+            dummy_yolo_1 = np.zeros((r_bound - l_bound, 1))
+            dummy_yolo_2 = np.zeros((r_bound - l_bound, 1))
+        else:
+            yolo_1 = np.zeros((r_bound - l_bound, 1 * base_grid_h, 1 * base_grid_w, len(self.anchors) // 3,
+                               4 + 1 + len(self.labels)))  # desired network output 1,32倍降采样
+            yolo_2 = np.zeros((r_bound - l_bound, 2 * base_grid_h, 2 * base_grid_w, len(self.anchors) // 3,
+                               4 + 1 + len(self.labels)))  # desired network output 2,16倍降采样
 
-        dummy_yolo_1 = np.zeros((r_bound - l_bound, 1))
-        dummy_yolo_2 = np.zeros((r_bound - l_bound, 1))
-        
+            yolo_3 = np.zeros((r_bound - l_bound, 4 * base_grid_h, 4 * base_grid_w, len(self.anchors) // 3,
+                               4 + 1 + len(self.labels)))  # desired network output 3,8倍降采样
+            yolos = [yolo_3, yolo_2, yolo_1]
+            dummy_yolo_1 = np.zeros((r_bound - l_bound, 1))
+            dummy_yolo_2 = np.zeros((r_bound - l_bound, 1))
+            dummy_yolo_3 = np.zeros((r_bound - l_bound, 1))
         instance_count = 0
         true_box_index = 0
 
@@ -145,9 +158,11 @@ class BatchGenerator(Sequence):
                 x_batch[instance_count] = img
 
             # increase instance counter in the current batch
-            instance_count += 1                 
-                
-        return [x_batch, t_batch, yolo_1, yolo_2], [dummy_yolo_1, dummy_yolo_2]
+            instance_count += 1
+        if self.tiny:
+            return [x_batch, t_batch, yolo_1, yolo_2], [dummy_yolo_1, dummy_yolo_2]
+        else:
+            return [x_batch, t_batch, yolo_1, yolo_2, yolo_3], [dummy_yolo_1, dummy_yolo_2, dummy_yolo_3]
 
     def _get_net_size(self, idx):
         if idx%10 == 0:
