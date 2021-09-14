@@ -3,6 +3,7 @@ import numpy as np
 from keras.utils import Sequence
 from utils.bbox import BoundBox, bbox_iou
 from utils.image import apply_random_scale_and_crop, random_distort_image, random_flip, correct_bounding_boxes
+from skimage import io
 
 
 class BatchGenerator(Sequence):
@@ -174,6 +175,7 @@ class BatchGenerator(Sequence):
     
     def _aug_image(self, instance, net_h, net_w):
         image_name = instance['filename']
+        # image = io.imread(image_name)
         image = cv2.imread(image_name)  # BGR image
         if image is None:
             print('Cannot find ', image_name)
@@ -245,5 +247,6 @@ class BatchGenerator(Sequence):
 
     def load_image(self, i):
         image_name = self.instances[i]['filename']
-        image = cv2.imread(image_name)
+        # image = cv2.imread(image_name)
+        image = io.imread(image_name)
         return image

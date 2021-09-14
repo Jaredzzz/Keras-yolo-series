@@ -32,7 +32,9 @@ def evaluate(model,
              net_w=512,
              nms_kind="greedynms",
              beta=0.6,
-             save_path=None):
+             save_path=None,
+             tiny=False
+             ):
     """ Evaluate a given dataset using a given model.
     code originally from https://github.com/fizyr/keras-retinanet
 
@@ -57,7 +59,7 @@ def evaluate(model,
 
         # make the boxes and the labels
         pred_batch_boxes, _ = get_yolo_boxes(model, raw_image, net_h, net_w, generator.get_anchors(), obj_thresh,
-                                             nms_thresh, nms_kind, beta)
+                                             nms_thresh, nms_kind, beta, tiny)
         pred_boxes = pred_batch_boxes[0]
         score = np.array([box.get_score() for box in pred_boxes])
         pred_labels = np.array([box.label for box in pred_boxes])        
@@ -166,6 +168,13 @@ def correct_yolo_boxes(boxes, image_h, image_w, net_h, net_w):
         boxes[i].ymin = int((boxes[i].ymin - y_offset) / y_scale * image_h)
         boxes[i].ymax = int((boxes[i].ymax - y_offset) / y_scale * image_h)
 
+        if boxes[i].xmin < 0: boxes[i].xmin = 0
+        if boxes[i].ymin < 0: boxes[i].ymin = 0
+        if boxes[i].xmax > image_w: boxes[i].xmax = image_w
+        if boxes[i].ymax > image_h: boxes[i].ymax = image_h
+
+
+
 
 def do_nms(boxes, nms_thresh, nms_kind, beta):
     if len(boxes) > 0:
@@ -184,9 +193,9 @@ def do_nms(boxes, nms_thresh, nms_kind, beta):
             for j in range(i+1, len(sorted_indices)):
                 index_j = sorted_indices[j]
 
-                if bbox_iou(boxes[index_i], boxes[index_j]) >= nms_thresh and nms_kind == "greedynms":
+                if nms_kind == "greedynms" and bbox_iou(boxes[index_i], boxes[index_j]) >= nms_thresh:
                     boxes[index_j].classes[c] = 0
-                elif bbox_diounms(boxes[index_i], boxes[index_j], beta) >= nms_thresh and nms_kind == "diounms":
+                elif nms_kind == "diounms" and bbox_diounms(boxes[index_i], boxes[index_j], beta) >= nms_thresh:
                     boxes[index_j].classes[c] = 0
                 else:
                     pass
@@ -206,8 +215,9 @@ def decode_netout(netout, anchors, obj_thresh, net_h, net_w):
     netout[..., 5:] *= netout[..., 5:] > obj_thresh
 
     for i in range(grid_h*grid_w):
-        row = i // grid_w
-        col = i % grid_w
+        # 取当前grid cell 的坐标
+        row = i // grid_w  # 取整数商
+        col = i % grid_w  # 取余数
         
         for b in range(nb_box):
             # 4th element is objectness score
@@ -260,7 +270,7 @@ def normalize(image):
     return image/255.
 
 
-def get_yolo_boxes(model, images, net_h, net_w, anchors, obj_thresh, nms_thresh, nms_kind, beta):
+def get_yolo_boxes(model, images, net_h, net_w, anchors, obj_thresh, nms_thresh, nms_kind, beta, tiny):
     image_h, image_w, _ = images[0].shape
     nb_images           = len(images)
     batch_input         = np.zeros((nb_images, net_h, net_w, 3))
@@ -277,12 +287,18 @@ def get_yolo_boxes(model, images, net_h, net_w, anchors, obj_thresh, nms_thresh,
     batch_boxes  = [None]*nb_images
 
     for i in range(nb_images):
-        yolos = [batch_output[0][i], batch_output[1][i]]
+        if tiny:
+            yolos = [batch_output[0][i], batch_output[1][i]]
+        else:
+            yolos = [batch_output[0][i], batch_output[1][i], batch_output[2][i]]
         boxes = []
 
         # decode the output of the network
         for j in range(len(yolos)):
-            yolo_anchors = anchors[(1-j)*6:(2-j)*6]  # config['model']['anchors']
+            if tiny:
+                yolo_anchors = anchors[(1 - j) * 6:(2 - j) * 6]  # config['model']['anchors']
+            else:
+                yolo_anchors = anchors[(2 - j) * 6:(3 - j) * 6]  # config['model']['anchors']
             boxes += decode_netout(yolos[j], yolo_anchors, obj_thresh, net_h, net_w)
 
         # correct the sizes of the bounding boxes

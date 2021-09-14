@@ -33,7 +33,7 @@ class CustomTensorBoard(TensorBoard):
 class CustomModelCheckpoint(ModelCheckpoint):
     """ to save the template model, not the multi-GPU model
     """
-    def __init__(self, model_to_save, addtion_save, valid_data, labels, **kwargs):
+    def __init__(self, model_to_save, addtion_save, valid_data, labels, tiny, **kwargs):
         super(CustomModelCheckpoint, self).__init__(**kwargs)
         self.model_to_save = model_to_save
         self.addtion_save = addtion_save
@@ -41,6 +41,7 @@ class CustomModelCheckpoint(ModelCheckpoint):
         self.labels = labels
         self.best_mAP = -1
         self.best_mSP = -1
+        self.tiny = tiny
 
     def on_epoch_end(self, epoch, logs=None):
         logs = logs or {}
@@ -87,7 +88,7 @@ class CustomModelCheckpoint(ModelCheckpoint):
                     self.model_to_save.save(filepath, overwrite=True)
         if self.addtion_save:
             if (epoch+1) % 5 == 0 and (epoch+1)>19:
-                average_precisions = evaluate(self.model_to_save, self.valid_data)
+                average_precisions = evaluate(self.model_to_save, self.valid_data, tiny=self.tiny)
                 ap = []
                 print('[INFO] Epoch: %05d' % (epoch + 1))
                 # print the mAP score

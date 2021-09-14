@@ -6,11 +6,11 @@ import shutil
 val_percent = 0.1
 train_percent = 0.8
 test_percent = 0.1
-image_path = "E:/Data/fastener/VOCdevkit/VOC2007/JPEGImages"
-xml_path = "E:/Data/fastener/VOCdevkit/VOC2007/Annotations"
+image_path = "E:/Data/underwater/train/image"
+xml_path = "E:/Data/underwater/train/box"
 
-image_savepath = "E:/Data/fastener/dataset/images"
-annotation_savepath = "E:/Data/fastener/dataset/annotations"
+image_savepath = "E:/Data/underwater/dataset/images"
+annotation_savepath = "E:/Data/underwater/dataset/annotations"
 
 if os.path.exists(image_savepath):
     pass
